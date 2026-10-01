@@ -1,0 +1,81 @@
+version: '3.8'
+
+# ── Variables compartidas para InfluxDB ────────────────────────────────────
+x-influx-env: &influx-env
+  DOCKER_INFLUXDB_INIT_MODE: setup
+  DOCKER_INFLUXDB_INIT_USERNAME: admin
+  DOCKER_INFLUXDB_INIT_PASSWORD: supersecretpassword  # ← ¡Cambia esto!
+  DOCKER_INFLUXDB_INIT_ORG: mi-org-iot
+  DOCKER_INFLUXDB_INIT_BUCKET: iot-data
+  DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: mi-token-secreto  # ← ¡Cambia esto!
+
+networks:
+  tig-net:
+    driver: bridge
+
+volumes:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:
+
+services:
+
+  # ── 1. InfluxDB — Base de datos de series de tiempo ─────────────────────
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    restart: unless-stopped
+    networks:
+      - tig-net
+    ports:
+      - "8086:8086"          # UI y API de InfluxDB
+    environment:
+      <<: *influx-env
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── 2. Telegraf — Agente recolector de datos ─────────────────────────────
+  telegraf:
+    image: telegraf:1.30
+    container_name: telegraf
+    restart: unless-stopped
+    networks:
+      - tig-net
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    environment:
+      <<: *influx-env
+      HOST_PROC: /rootfs/proc
+      HOST_SYS: /rootfs/sys
+      HOST_ETC: /rootfs/etc
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/rootfs/sys:ro
+      - /proc:/rootfs/proc:ro
+      - /etc:/rootfs/etc:ro
+
+  # ── 3. Grafana — Visualización y Dashboards ──────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana
+    restart: unless-stopped
+    networks:
+      - tig-net
+    ports:
+      - "3000:3000"          # UI de Grafana
+    depends_on:
+      - influxdb
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: grafana-password  # ← ¡Cambia esto!
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana

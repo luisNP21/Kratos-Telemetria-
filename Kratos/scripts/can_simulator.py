@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 """
-KRATOS FSAE TELEMETRÍA — EMULADOR DE TRAMAS CAN BUS (FORMATO BIG ENDIAN / MOTOROLA)
+KRATOS FSAE TELEMETRÍA — EMULADOR OFICIAL MULTIPROTOCOLO CAN BUS
 ===================================================================================
-Inyecta tramas periódicas realistas en 'vcan0' (o 'can0') y, simultáneamente, en el
-bridge de desarrollo para WSL2/Docker Desktop ('kratos/can_raw' en localhost:1883),
-simulando los bytes crudos en formato Big Endian:
-  - 0x10D: Energy Meter (Voltaje [300V - 400V], Corriente [A] y Potencia [W])
-  - 0x40D: Energy Meter (Energía acumulada [Wh], Estado y Contador de tramas)
-  - 0x6B0: Orion BMS (Voltaje del Pack, Corriente, SOC [%] y Temperaturas de celdas [°C])
+Inyecta tramas periódicas hacia 'vcan0' (o 'can0') y hacia el bridge de desarrollo
+WSL2/Docker ('kratos/can_raw' en localhost:1883), respetando el ordenamiento de bytes
+y tipos de datos exactos de los tres manuales oficiales de hardware:
 
-Requisitos:
-  pip install python-can
+1. Energy Meter Oficial FSAE (Big Endian / Motorola @ 500 kbps):
+   - 0x10d: Bytes 0..3 = Current [A] (IEEE 754 float BE), Bytes 4..7 = Voltage [V] (IEEE 754 float BE)
+   - 0x40d: Byte 0 (Bit 0 = Violation, Bit 1 = Logging), Bytes 1..3 = Reserved, Bytes 4..7 = Energy [Whr] (IEEE 754 float BE)
+   - 0x60d: Byte 0 (bits 0..2 = mux_id=0, bits 3..7 = num_sensors), Byte 1 = Min Temp (0.5 °C/bit), Byte 2 = Max Temp (0.5 °C/bit)
+
+2. Orion BMS 2 (Big Endian / Motorola @ 500 kbps):
+   - 0x6B0: Bytes 0..1 = Pack Current (int16 BE, 0.1 A), Bytes 2..3 = Pack Voltage (uint16 BE, 0.1 V),
+            Byte 4 = Pack SOC (uint8, 0.5 %), Byte 5 = High Temp (int8, °C), Byte 6 = Low Temp (int8, °C), Byte 7 = Relay/Fault
+   - 0x6B1: Bytes 0..1 = Pack DCL (uint16 BE, A), Bytes 2..3 = Pack CCL (uint16 BE, A),
+            Bytes 4..5 = High Cell Voltage (uint16 BE, 0.0001 V), Bytes 6..7 = Low Cell Voltage (uint16 BE, 0.0001 V)
+
+3. Inversor BorgWarner / Cascadia Motion CM Family (Little Endian / Intel):
+   - 0x0A2: Bytes 0..1 = Inverter Module Temp (int16 LE, 0.1 °C), Bytes 4..5 = Motor Temp (int16 LE, 0.1 °C)
+   - 0x0A5: Bytes 2..3 = Motor Speed (int16 LE, RPM)
+   - 0x0A6: Bytes 6..7 = DC Bus Current (int16 LE, 0.1 A)
+   - 0x0A7: Bytes 0..1 = DC Bus Voltage (int16 LE, 0.1 V)
 """
 
 import argparse
@@ -38,7 +49,7 @@ class RawMqttBridge:
     """
     Cliente MQTT 3.1.1 minimalista (usando solo 'socket' estándar de Python)
     para inyectar los bytes crudos de las tramas CAN hacia Node-RED cuando se
-    ejecuta sobre WSL2 + Docker Desktop (donde la VM de Docker está aislada de vcan0).
+    ejecuta sobre WSL2 + Docker Desktop.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 1883, topic: str = "kratos/can_raw") -> None:
@@ -78,7 +89,6 @@ class RawMqttBridge:
             ).encode("utf-8")
             vh = struct.pack(">H", len(self.topic)) + self.topic
             rem_len = len(vh) + len(body)
-            # Codificar Remaining Length de MQTT
             rl_bytes = bytearray()
             x = rem_len
             while True:
@@ -105,65 +115,138 @@ class RawMqttBridge:
             self.sock = None
 
 
-def build_energy_meter_vi_frame(voltage_v: float, current_a: float) -> can.Message:
-    """
-    Construye trama 0x10D (8 bytes en Big Endian / Motorola):
-      - Bytes 0..1: uint16 BE -> Voltaje * 10 (0.1 V/bit)
-      - Bytes 2..3: int16 BE  -> Corriente * 10 (0.1 A/bit)
-      - Bytes 4..7: int32 BE  -> Potencia instantánea en W
-    """
-    raw_voltage = max(0, min(65535, int(round(voltage_v * 10.0))))
-    raw_current = max(-32768, min(32767, int(round(current_a * 10.0))))
-    power_w = int(round(voltage_v * current_a))
+# ── 1. Constructores Energy Meter FSAE (Big Endian / Motorola) ───────────────
 
-    data = struct.pack(">Hhi", raw_voltage, raw_current, power_w)
+def build_em_0x10d_measurement(current_a: float, voltage_v: float) -> can.Message:
+    """
+    ID 0x10d (Measurement Message, Big Endian):
+      - Bytes 0..3: Current [A] en IEEE 754 float BE (>f)
+      - Bytes 4..7: Voltage [V] en IEEE 754 float BE (>f)
+    """
+    data = struct.pack(">ff", float(current_a), float(voltage_v))
     return can.Message(arbitration_id=0x10D, data=data, is_extended_id=False)
 
 
-def build_energy_meter_status_frame(energy_wh: float, status: int, counter: int) -> can.Message:
+def build_em_0x40d_status(violation: int, logging: int, energy_whr: float) -> can.Message:
     """
-    Construye trama 0x40D (8 bytes en Big Endian / Motorola):
-      - Bytes 0..3: uint32 BE -> Energía acumulada * 10 (0.1 Wh/bit)
-      - Byte  4:    uint8     -> Código de estado (0=OK, 1=WARN, 2=FAULT)
-      - Bytes 5..6: uint16 BE -> Contador de tramas (0..65535)
-      - Byte  7:    uint8     -> Reservado (0)
+    ID 0x40d (Status Message, Big Endian):
+      - Byte 0: Bit 0 = Violation, Bit 1 = Logging
+      - Bytes 1..3: Reservados (0x00)
+      - Bytes 4..7: Energy [Whr] en IEEE 754 float BE (>f)
     """
-    raw_energy = max(0, int(round(energy_wh * 10.0)))
-    raw_counter = counter & 0xFFFF
-    data = struct.pack(">IBHB", raw_energy, status & 0xFF, raw_counter, 0)
+    byte0 = (violation & 0x01) | ((logging & 0x01) << 1)
+    data = struct.pack(">BBBBf", byte0, 0, 0, 0, float(energy_whr))
     return can.Message(arbitration_id=0x40D, data=data, is_extended_id=False)
 
 
-def build_orion_bms_frame(
-    pack_voltage_v: float,
+def build_em_0x60d_temperature(min_temp_c: float, max_temp_c: float, num_sensors: int = 4) -> can.Message:
+    """
+    ID 0x60d (Temperature Message):
+      - Byte 0: bits 0..2 = mux_id (0), bits 3..7 = num_sensors
+      - Byte 1: Min Temp (uint8, factor 0.5 °C)
+      - Byte 2: Max Temp (uint8, factor 0.5 °C)
+    """
+    mux_id = 0
+    byte0 = (mux_id & 0x07) | ((num_sensors & 0x1F) << 3)
+    raw_min = max(0, min(255, int(round(min_temp_c * 2.0))))
+    raw_max = max(0, min(255, int(round(max_temp_c * 2.0))))
+    data = struct.pack(">BBBBBBBB", byte0, raw_min, raw_max, 0, 0, 0, 0, 0)
+    return can.Message(arbitration_id=0x60D, data=data, is_extended_id=False)
+
+
+# ── 2. Constructores Orion BMS (Big Endian / Motorola) ───────────────────────
+
+def build_bms_0x6b0_state(
     pack_current_a: float,
+    pack_voltage_v: float,
     soc_pct: float,
-    temp_max_c: int,
-    temp_avg_c: int,
-    bms_status: int = 0,
+    high_temp_c: int,
+    low_temp_c: int,
+    relay_status: int = 0x01,
 ) -> can.Message:
     """
-    Construye trama 0x6B0 del Orion BMS (8 bytes en Big Endian / Motorola):
-      - Bytes 0..1: uint16 BE -> Voltaje Pack * 10 (0.1 V/bit)
-      - Bytes 2..3: int16 BE  -> Corriente Pack * 10 (0.1 A/bit)
-      - Byte  4:    uint8     -> SOC * 2 (0.5 %/bit)
-      - Byte  5:    int8      -> Temperatura máxima de celdas (°C)
-      - Byte  6:    int8      -> Temperatura promedio de celdas (°C)
-      - Byte  7:    uint8     -> Flags de estado BMS
+    ID 0x6B0 (Estado del Pack BMS, Big Endian):
+      - Bytes 0..1: Pack Current (int16 BE, 0.1 A)
+      - Bytes 2..3: Pack Instantaneous Voltage (uint16 BE, 0.1 V)
+      - Byte  4:    Pack SOC (uint8, 0.5 %)
+      - Byte  5:    High Temperature (int8, °C)
+      - Byte  6:    Low Temperature (int8, °C)
+      - Byte  7:    Relay / Fault Status (uint8)
     """
-    raw_v = max(0, min(65535, int(round(pack_voltage_v * 10.0))))
-    raw_i = max(-32768, min(32767, int(round(pack_current_a * 10.0))))
+    raw_curr = max(-32768, min(32767, int(round(pack_current_a * 10.0))))
+    raw_volt = max(0, min(65535, int(round(pack_voltage_v * 10.0))))
     raw_soc = max(0, min(200, int(round(soc_pct * 2.0))))
-    raw_tmax = max(-40, min(120, int(temp_max_c)))
-    raw_tavg = max(-40, min(120, int(temp_avg_c)))
-
-    data = struct.pack(">HhBbbB", raw_v, raw_i, raw_soc, raw_tmax, raw_tavg, bms_status & 0xFF)
+    raw_tmax = max(-40, min(120, int(high_temp_c)))
+    raw_tmin = max(-40, min(120, int(low_temp_c)))
+    data = struct.pack(">hHBbbB", raw_curr, raw_volt, raw_soc, raw_tmax, raw_tmin, relay_status & 0xFF)
     return can.Message(arbitration_id=0x6B0, data=data, is_extended_id=False)
+
+
+def build_bms_0x6b1_limits(
+    dcl_a: int, ccl_a: int, high_cell_v: float, low_cell_v: float
+) -> can.Message:
+    """
+    ID 0x6B1 (Límites de Corriente y Celdas BMS, Big Endian):
+      - Bytes 0..1: Pack DCL (uint16 BE, A)
+      - Bytes 2..3: Pack CCL (uint16 BE, A)
+      - Bytes 4..5: High Cell Voltage (uint16 BE, 0.0001 V)
+      - Bytes 6..7: Low Cell Voltage (uint16 BE, 0.0001 V)
+    """
+    raw_dcl = max(0, min(65535, int(dcl_a)))
+    raw_ccl = max(0, min(65535, int(ccl_a)))
+    raw_vhigh = max(0, min(65535, int(round(high_cell_v / 0.0001))))
+    raw_vlow = max(0, min(65535, int(round(low_cell_v / 0.0001))))
+    data = struct.pack(">HHHH", raw_dcl, raw_ccl, raw_vhigh, raw_vlow)
+    return can.Message(arbitration_id=0x6B1, data=data, is_extended_id=False)
+
+
+# ── 3. Constructores Inversor BorgWarner / Cascadia Motion (Little Endian!) ──
+
+def build_inv_0x0a2_temps(inverter_temp_c: float, motor_temp_c: float) -> can.Message:
+    """
+    ID 0x0A2 (Temperaturas Inversor y Motor EMRAX, Little Endian):
+      - Bytes 0..1: Inverter Module Temperature (int16 LE, 0.1 °C)
+      - Bytes 4..5: Motor Temperature (int16 LE, 0.1 °C)
+    """
+    raw_inv = max(-32768, min(32767, int(round(inverter_temp_c * 10.0))))
+    raw_mot = max(-32768, min(32767, int(round(motor_temp_c * 10.0))))
+    data = struct.pack("<hhhh", raw_inv, raw_inv, raw_mot, 0)
+    return can.Message(arbitration_id=0x0A2, data=data, is_extended_id=False)
+
+
+def build_inv_0x0a5_speed(motor_speed_rpm: int) -> can.Message:
+    """
+    ID 0x0A5 (Posición y Velocidad del Motor, Little Endian):
+      - Bytes 2..3: Motor Speed (int16 LE, RPM)
+    """
+    raw_rpm = max(-32768, min(32767, int(motor_speed_rpm)))
+    data = struct.pack("<hhhh", 0, raw_rpm, 0, 0)
+    return can.Message(arbitration_id=0x0A5, data=data, is_extended_id=False)
+
+
+def build_inv_0x0a6_current(dc_bus_current_a: float) -> can.Message:
+    """
+    ID 0x0A6 (Corrientes del Inversor, Little Endian):
+      - Bytes 6..7: DC Bus Current (int16 LE, 0.1 A)
+    """
+    raw_idc = max(-32768, min(32767, int(round(dc_bus_current_a * 10.0))))
+    data = struct.pack("<hhhh", 0, 0, 0, raw_idc)
+    return can.Message(arbitration_id=0x0A6, data=data, is_extended_id=False)
+
+
+def build_inv_0x0a7_voltage(dc_bus_voltage_v: float) -> can.Message:
+    """
+    ID 0x0A7 (Voltaje DC del Inversor, Little Endian):
+      - Bytes 0..1: DC Bus Voltage (int16 LE, 0.1 V)
+    """
+    raw_vdc = max(-32768, min(32767, int(round(dc_bus_voltage_v * 10.0))))
+    data = struct.pack("<hhhh", raw_vdc, 0, 0, 0)
+    return can.Message(arbitration_id=0x0A7, data=data, is_extended_id=False)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Emulador CAN Bus Kratos FSAE (Big Endian / Motorola) para vcan0/can0 y WSL2"
+        description="Emulador CAN Bus Kratos FSAE (Energy Meter BE + Orion BMS BE + BorgWarner LE)"
     )
     parser.add_argument(
         "-i",
@@ -176,7 +259,7 @@ def main() -> None:
         "--freq",
         type=float,
         default=5.0,
-        help="Frecuencia de envío en Hz (por defecto: 5.0 Hz)",
+        help="Frecuencia de ciclo completo en Hz (por defecto: 5.0 Hz)",
     )
     args = parser.parse_args()
 
@@ -195,50 +278,75 @@ def main() -> None:
     bridge = RawMqttBridge(host="127.0.0.1", port=1883, topic="kratos/can_raw")
 
     t0 = time.monotonic()
-    energy_wh = 120.0
-    soc_pct = 92.0
-    frame_counter = 0
+    energy_whr = 125.0
+    soc_pct = 90.0
+    cycle = 0
 
     print(
-        f"[Kratos CAN Simulator] Transmitiendo tramas 0x10D, 0x40D y 0x6B0 en Big Endian ({args.freq} Hz). "
-        "Presiona Ctrl+C para detener."
+        f"[Kratos CAN Simulator] Transmitiendo tramas oficiales:\n"
+        f"  - Energy Meter (BE): 0x10d, 0x40d, 0x60d\n"
+        f"  - Orion BMS    (BE): 0x6B0, 0x6B1\n"
+        f"  - BorgWarner   (LE): 0x0A2, 0x0A5, 0x0A6, 0x0A7\n"
+        f"Presiona Ctrl+C para detener."
     )
     try:
         while True:
             elapsed = time.monotonic() - t0
-            frame_counter += 1
+            cycle += 1
 
-            # Simulación realista de vuelta en pista:
-            # - Voltaje oscila entre 300 V y 400 V (centro 350 V)
-            voltage_v = 350.0 + 48.0 * math.sin(elapsed * 0.25) + random.uniform(-1.5, 1.5)
+            # Simulación física sincronizada entre los 3 subsistemas
+            voltage_v = 365.0 + 30.0 * math.sin(elapsed * 0.25) + random.uniform(-0.8, 0.8)
             voltage_v = max(300.0, min(400.0, voltage_v))
 
-            # - Corriente de tracción/regeneración entre -20 A y 180 A
-            current_a = 75.0 + 65.0 * math.sin(elapsed * 0.6) + random.uniform(-4.0, 4.0)
+            current_a = 72.0 + 68.0 * math.sin(elapsed * 0.55) + random.uniform(-2.5, 2.5)
+            power_kw = (voltage_v * current_a) / 1000.0
 
-            # - Integración de energía acumulada (Wh) y descarga progresiva de SOC
-            power_w = voltage_v * current_a
-            energy_wh = max(0.0, energy_wh + (power_w * period_s) / 3600.0)
-            soc_pct = max(15.0, 92.0 - (energy_wh - 120.0) * 0.015)
+            energy_whr = max(0.0, energy_whr + (power_kw * 1000.0 * period_s) / 3600.0)
+            soc_pct = max(15.0, 90.0 - (energy_whr - 125.0) * 0.015)
 
-            # - Temperaturas de celdas Orion BMS (32 °C a 52 °C)
-            temp_avg_c = int(round(34.0 + 6.0 * math.sin(elapsed * 0.08)))
-            temp_max_c = temp_avg_c + random.choice([3, 4, 5])
+            violation = 1 if power_kw > 80.0 else 0
+            logging = 1 if voltage_v > 60.0 else 0
 
-            status_code = 0 if voltage_v >= 310.0 and temp_max_c < 55 else 1
+            em_min_temp_c = 28.5 + 3.0 * math.sin(elapsed * 0.05)
+            em_max_temp_c = em_min_temp_c + 4.5
 
-            msg_10d = build_energy_meter_vi_frame(voltage_v, current_a)
-            msg_40d = build_energy_meter_status_frame(energy_wh, status_code, frame_counter)
-            msg_6b0 = build_orion_bms_frame(
-                pack_voltage_v=voltage_v + random.uniform(-0.8, 0.8),
-                pack_current_a=current_a + random.uniform(-0.5, 0.5),
-                soc_pct=soc_pct,
-                temp_max_c=temp_max_c,
-                temp_avg_c=temp_avg_c,
-                bms_status=status_code,
-            )
+            bms_low_temp = int(round(32.0 + 4.0 * math.sin(elapsed * 0.08)))
+            bms_high_temp = bms_low_temp + random.choice([4, 5, 6])
+            high_cell_v = (voltage_v / 96.0) + 0.018
+            low_cell_v = (voltage_v / 96.0) - 0.015
 
-            for m in (msg_10d, msg_40d, msg_6b0):
+            inv_temp_c = 41.5 + 7.5 * math.sin(elapsed * 0.12)
+            motor_temp_c = 58.0 + 11.0 * math.sin(elapsed * 0.10)
+            motor_rpm = max(0, int(round(3400 + 2100 * math.sin(elapsed * 0.55))))
+
+            frames = [
+                # Energy Meter (Big Endian)
+                build_em_0x10d_measurement(current_a, voltage_v),
+                build_em_0x40d_status(violation, logging, energy_whr),
+                build_em_0x60d_temperature(em_min_temp_c, em_max_temp_c, num_sensors=4),
+                # Orion BMS (Big Endian)
+                build_bms_0x6b0_state(
+                    pack_current_a=current_a + random.uniform(-0.3, 0.3),
+                    pack_voltage_v=voltage_v + random.uniform(-0.4, 0.4),
+                    soc_pct=soc_pct,
+                    high_temp_c=bms_high_temp,
+                    low_temp_c=bms_low_temp,
+                    relay_status=0x01,
+                ),
+                build_bms_0x6b1_limits(
+                    dcl_a=220,
+                    ccl_a=45,
+                    high_cell_v=high_cell_v,
+                    low_cell_v=low_cell_v,
+                ),
+                # BorgWarner / Cascadia Motion Inverter (Little Endian)
+                build_inv_0x0a2_temps(inv_temp_c, motor_temp_c),
+                build_inv_0x0a5_speed(motor_rpm),
+                build_inv_0x0a6_current(current_a + random.uniform(-0.5, 0.5)),
+                build_inv_0x0a7_voltage(voltage_v + random.uniform(-0.5, 0.5)),
+            ]
+
+            for m in frames:
                 if bus is not None:
                     try:
                         bus.send(m)
@@ -247,10 +355,10 @@ def main() -> None:
                 bridge.send_raw_can_frame(m)
 
             print(
-                f"[TX #{frame_counter:04d}] "
-                f"0x10D: V={voltage_v:6.1f}V I={current_a:6.1f}A P={int(power_w):6d}W | "
-                f"0x40D: E={energy_wh:7.1f}Wh ST={status_code} | "
-                f"0x6B0 (BMS): SOC={soc_pct:4.1f}% Tmax={temp_max_c}°C Tavg={temp_avg_c}°C"
+                f"[TX #{cycle:04d}] "
+                f"EM(BE) 0x10d: I={current_a:6.2f}A V={voltage_v:6.2f}V P={power_kw:5.2f}kW | "
+                f"BMS(BE) 0x6B0: SOC={soc_pct:4.1f}% T={bms_low_temp}/{bms_high_temp}°C | "
+                f"BW(LE) 0x0A5: {motor_rpm:4d}RPM Tmot={motor_temp_c:4.1f}°C"
             )
 
             time.sleep(period_s)

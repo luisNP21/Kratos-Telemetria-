@@ -2,13 +2,13 @@
 
 Plataforma de adquisición de datos en el borde (*Edge Computing*), almacenamiento en caja negra local y telemetría inalámbrica en tiempo real para el monoplaza eléctrico del equipo **Kratos Formula SAE — Universidad EAFIT**.
 
-El sistema adquiere parámetros críticos del tren motriz eléctrico (**Orion BMS**, **Energy Meter** e **Inversor**) a través del **bus CAN a $500\text{ kbps}$**, además de variables dinámicas del vehículo mediante sensores inerciales (**IMU GY-91**) y posicionamiento **GNSS/LTE 4G**.
+El sistema adquiere parámetros críticos del tren motriz eléctrico (**Orion BMS**, **Energy Meter FSAE** e **Inversor BorgWarner / Cascadia Motion**) a través del **bus CAN a $500\text{ kbps}$**, además de variables dinámicas del vehículo mediante sensores inerciales (**IMU GY-91**) y posicionamiento **GNSS/LTE 4G**.
 
 ---
 
 ## 1. Arquitectura de Hardware (Plataforma Raspberry Pi 5)
 
-El sistema migró desde la propuesta anterior (`Compulab IOT-GATE-iMX7` + `SIM7100`) hacia una arquitectura modular, de alto rendimiento y soporte nativo en Linux de 64 bits basada en **Raspberry Pi 5**:
+El sistema está diseñado sobre una arquitectura modular en Linux de 64 bits basada en **Raspberry Pi 5**:
 
 | Subsistema | Componente / Referencia | Interfaz / Especificación Técnica |
 | :--- | :--- | :--- |
@@ -25,7 +25,7 @@ El sistema migró desde la propuesta anterior (`Compulab IOT-GATE-iMX7` + `SIM71
 ## 2. Conexionado Eléctrico y Pines GPIO (Raspberry Pi 5)
 
 ### 2.1 Interfaz CAN Bus (`MCP2515` + Conversor de Nivel Lógico `TXB0108`)
-Dado que los pines GPIO de la Raspberry Pi 5 operan a **$3.3\text{ V}$** (y no son tolerantes a $5\text{ V}$) mientras que el transceptor CAN `TJA1050` requiere alimentación de **$5.0\text{ V}$**, todas las líneas digitales SPI e interrupción pasan a través del conversor bidireccional `TXB0108`:
+Dado que los pines GPIO de la Raspberry Pi 5 operan a **$3.3\text{ V}$** mientras que el transceptor CAN `TJA1050` requiere alimentación de **$5.0\text{ V}$**, todas las líneas digitales SPI e interrupción pasan a través del conversor bidireccional `TXB0108`:
 
 * **Lado Bajo Voltaje (`VCCA` = $3.3\text{ V}$):** Conectado al riel de $3.3\text{ V}$ de la Raspberry Pi 5 (Pin 1) y `OE` habilitado a $3.3\text{ V}$.
 * **Lado Alto Voltaje (`VCCB` = $5.0\text{ V}$):** Conectado al riel de $5.0\text{ V}$ de la Raspberry Pi 5 (Pin 2 o Pin 4) y alimentación `VCC` del módulo `MCP2515`.
@@ -40,7 +40,7 @@ Dado que los pines GPIO de la Raspberry Pi 5 operan a **$3.3\text{ V}$** (y no s
 | **Referencia** | Pin 6 / 9 / 20 | `GND` | `GND` | `GND` |
 
 ### 2.2 Sensor Inercial IMU `GY-91` (Conexión Directa a $3.3\text{ V}$)
-El módulo `GY-91` opera nativamente a $3.3\text{ V}$ y se conecta directamente al bus **I2C1** de la Raspberry Pi 5 sin pasar por el conversor de $5\text{ V}$:
+El módulo `GY-91` opera nativamente a $3.3\text{ V}$ y se conecta directamente al bus **I2C1** de la Raspberry Pi 5:
 
 | Señal I2C | Pin Físico RPi 5 | GPIO RPi 5 | Pin Módulo `GY-91` |
 | :--- | :---: | :---: | :--- |
@@ -51,21 +51,21 @@ El módulo `GY-91` opera nativamente a $3.3\text{ V}$ y se conecta directamente 
 
 ---
 
-## 3. Arquitectura de Software Unificada (Sin Telegraf)
+## 3. Arquitectura de Software Unificada
 
-Se eliminó **Telegraf** de la arquitectura para reducir latencia, consumo de RAM y puntos de fallo en el borde. **Node-RED** actúa como motor central de adquisición y ruteo en tiempo real:
+**Node-RED** actúa como motor central de adquisición desde **SocketCAN**, decodificación híbrida (**Big Endian / Little Endian**) y ruteo en paralelo en tiempo real:
 
 ```mermaid
 flowchart LR
     subgraph Monoplaza["Monoplaza Kratos (Bus CAN 500 kbps)"]
-        EM["Energy Meter\n(0x10D, 0x40D)"]
-        BMS["Orion BMS\n(0x6B0)"]
-        INV["Inversor"]
+        EM["Energy Meter (BE)\n(0x10d, 0x40d, 0x60d)"]
+        BMS["Orion BMS (BE)\n(0x6B0, 0x6B1)"]
+        INV["Inversor BorgWarner (LE)\n(0x0A2, 0x0A5, 0x0A6, 0x0A7)"]
     end
 
     subgraph RPi5["Raspberry Pi 5 (Docker Host / NVMe)"]
         SCAN["SocketCAN\n(can0 / vcan0)"]
-        NR["Node-RED\n(Decodificador Big Endian)"]
+        NR["Node-RED\n(Parser Híbrido BE/LE)"]
         IDB[("InfluxDB 2.7\nCaja Negra NVMe\n(telemetria_carro)")]
         MOSQ["Eclipse Mosquitto 2.0\nBroker MQTT (:1883)"]
         GRAF["Grafana\nDashboards (:3000)"]
@@ -76,18 +76,18 @@ flowchart LR
     end
 
     EM & BMS & INV -->|SPI / MCP2515| SCAN
-    SCAN -->|network_mode: host| NR
-    NR -->|Escritura Directa Paralela| IDB
+    SCAN -->|SocketCAN| NR
+    NR -->|Influx Line Protocol| IDB
     NR -->|Publicación Paralela| MOSQ
     IDB --> GRAF
     MOSQ --> LTE
 ```
 
-### Decisiones Clave de Ingeniería
-1. **Eliminación de Telegraf y Bifurcación en Paralelo:** Node-RED lee directamente de la interfaz de red del kernel (`can0` o `vcan0`), decodifica los bytes crudos en orden **Big Endian (Motorola)** y bifurca cada trama hacia dos salidas simultáneas:
-   * **Salida 1 — Caja Negra Local (InfluxDB 2.7 sobre SSD NVMe):** Persistencia inmediata con retención infinita (`0s`). Si el monoplaza pierde cobertura 4G LTE en pista o sufre un apagón súbito del sistema de baja tensión (GLV), los datos quedan resguardados localmente en los volúmenes persistentes sobre el disco NVMe.
+### Características Clave del Sistema
+1. **Ingesta Directa y Bifurcación en Paralelo:** Node-RED lee directamente de la interfaz de red del kernel (`can0` o `vcan0`), decodifica las tramas binarias en formato **Big Endian (Motorola)** y **Little Endian (Intel)** y bifurca cada muestra hacia dos salidas simultáneas:
+   * **Salida 1 — Caja Negra Local (InfluxDB 2.7 sobre SSD NVMe):** Escritura directa mediante *Influx Line Protocol* con retención infinita (`0s`). Si el monoplaza pierde cobertura 4G LTE en pista o sufre un apagón súbito del sistema de baja tensión (GLV), los datos quedan resguardados localmente en los volúmenes persistentes sobre el disco NVMe.
    * **Salida 2 — Telemetría en Tiempo Real (Eclipse Mosquitto MQTT):** Publicación en tópicos jerárquicos ligeros para monitoreo en vivo desde los pits.
-2. **Acceso Nativo a SocketCAN (`network_mode: host`):** El contenedor `nodered` se ejecuta con `network_mode: host` para acceder de forma transparente a las interfaces `can0` y `vcan0` del sistema operativo anfitrión sin sobrecarga de virtualización de red.
+2. **Integración Nativa con SocketCAN:** Acceso directo a las interfaces `can0` y `vcan0` del sistema operativo Linux anfitrión.
 
 ---
 
@@ -95,38 +95,43 @@ flowchart LR
 
 ```text
 Kratos-Telemetria-/
-├── README.md                        # Documentación general actualizada a Raspberry Pi 5
+├── README.md                                       # Documentación general del proyecto
 └── Kratos/
-    ├── docker-compose.yml           # Stack unificado (Mosquitto, Node-RED, InfluxDB, Grafana)
-    ├── .env                         # Variables de entorno centralizadas (credenciales, tokens, buckets)
+    ├── INFORME_TECNICO_ARQUITECTURA_SOFTWARE.md    # Informe técnico oficial para jueces FSAE y equipo
+    ├── docker-compose.yml                          # Stack unificado (Mosquitto, Node-RED, InfluxDB, Grafana)
+    ├── .env                                        # Variables de entorno centralizadas (credenciales, tokens, buckets)
     ├── mosquitto/
     │   └── config/
-    │       └── mosquitto.conf       # Configuración del broker MQTT
+    │       └── mosquitto.conf                      # Configuración del broker MQTT
     ├── nodered/
     │   └── data/
-    │       ├── package.json         # Dependencias (node-red-contrib-socketcan, node-red-contrib-influxdb)
-    │       └── flows.json           # Flujo preconfigurado de lectura CAN, parseo Big Endian, InfluxDB y MQTT
+    │       ├── package.json                        # Dependencias (node-red-contrib-socketcan, node-red-contrib-influxdb)
+    │       └── flows.json                          # Flujo de lectura CAN, parseo BE/LE, Line Protocol y MQTT
     └── scripts/
-        ├── setup_vcan.sh            # Script para levantar vcan0 en Ubuntu (pruebas sin hardware)
-        ├── setup_can0_rpi5.sh       # Script para levantar can0 físico a 500 kbps en la Raspberry Pi 5
-        └── can_simulator.py         # Emulador en Python (python-can) que inyecta tramas reales 0x10d, 0x40d y BMS
+        ├── setup_vcan.sh                           # Script para instalar can-utils y levantar vcan0 en Ubuntu
+        ├── setup_can0_rpi5.sh                      # Script para levantar can0 físico a 500 kbps en la Raspberry Pi 5
+        └── can_simulator.py                        # Emulador en Python (python-can) para Energy Meter, BMS e Inversor
 ```
 
 ---
 
-## 5. Diccionario de Tramas CAN (Big Endian / Motorola) y Tópicos MQTT
+## 5. Diccionario de Tramas CAN (Manuales Oficiales: Big Endian + Little Endian)
 
-| ID CAN | Subsistema | Bytes (Big Endian) | Variables Decodificadas | Tópicos MQTT Publicados |
-| :---: | :--- | :--- | :--- | :--- |
-| `0x10D` | Energy Meter | `0..1`: `uint16 BE` ($0.1\text{ V}$)<br>`2..3`: `int16 BE` ($0.1\text{ A}$)<br>`4..7`: `int32 BE` ($1\text{ W}$) | Voltaje ($300\text{–}400\text{ V}$)<br>Corriente ($\text{A}$)<br>Potencia ($\text{W}$) | `kratos/telemetria/energy_meter/voltaje`<br>`kratos/telemetria/energy_meter/corriente`<br>`kratos/telemetria/energy_meter/potencia` |
-| `0x40D` | Energy Meter | `0..3`: `uint32 BE` ($0.1\text{ Wh}$)<br>`4`: `uint8` (Estado)<br>`5..6`: `uint16 BE` (Contador) | Energía acumulada ($\text{Wh}$)<br>Estado del sensor | `kratos/telemetria/energy_meter/energia`<br>`kratos/telemetria/energy_meter/estado` |
-| `0x6B0` | Orion BMS | `0..1`: `uint16 BE` ($0.1\text{ V}$)<br>`2..3`: `int16 BE` ($0.1\text{ A}$)<br>`4`: `uint8` ($0.5\text{ \%}$)<br>`5`: `int8` ($1\text{ }^\circ\text{C}$)<br>`6`: `int8` ($1\text{ }^\circ\text{C}$) | Voltaje del Pack ($\text{V}$)<br>Corriente del Pack ($\text{A}$)<br>Estado de Carga `SOC` ($\text{\%}$)<br>Temp. Máxima y Promedio ($^\circ\text{C}$) | `kratos/telemetria/bms/voltaje_pack`<br>`kratos/telemetria/bms/corriente_pack`<br>`kratos/telemetria/bms/soc`<br>`kratos/telemetria/bms/temperatura`<br>`kratos/telemetria/bms/temperatura_promedio` |
+| ID CAN | Subsistema (`origen`) | Endianness | Mapa de Bytes (Manuales Oficiales) | Variables Decodificadas | Tópicos MQTT Publicados |
+| :---: | :--- | :---: | :--- | :--- | :--- |
+| `0x10d` | `energy_meter` | **Big Endian** | `0..3`: `float BE` (`Current [A]`!)<br>`4..7`: `float BE` (`Voltage [V]`) | `current` ($\text{A}$), `voltage` ($\text{V}$)<br>`power_kw` ($\text{kW}$) | `kratos/telemetria/energy_meter/0x10d`<br>`kratos/telemetria/energy_meter/corriente`<br>`kratos/telemetria/energy_meter/voltaje`<br>`kratos/telemetria/energy_meter/potencia_kw` |
+| `0x40d` | `energy_meter` | **Big Endian** | `Byte 0 [0]`: `Violation`<br>`Byte 0 [1]`: `Logging`<br>`1..3`: Reservados<br>`4..7`: `float BE` (`Energy [Whr]`) | `violation` ($0/1$)<br>`logging` ($0/1$)<br>`energy_whr` ($\text{Whr}$) | `kratos/telemetria/energy_meter/0x40d`<br>`kratos/telemetria/energy_meter/energia` |
+| `0x60d` | `energy_meter` | **Big Endian** | `Byte 0 [2:0]`: `mux_id` ($0$)<br>`Byte 0 [7:3]`: `num_sensors`<br>`Byte 1`: `Min Temp` ($0.5\text{ }^\circ\text{C}$)<br>`Byte 2`: `Max Temp` ($0.5\text{ }^\circ\text{C}$) | `min_temp` ($^\circ\text{C}$)<br>`max_temp` ($^\circ\text{C}$)<br>`num_sensors` | `kratos/telemetria/energy_meter/0x60d` |
+| `0x6b0` | `orion_bms` | **Big Endian** | `0..1`: `int16 BE` ($0.1\text{ A}$)<br>`2..3`: `uint16 BE` ($0.1\text{ V}$)<br>`4`: `uint8` ($0.5\text{ \%}$)<br>`5`: `int8` ($T_{\max}$), `6`: `int8` ($T_{\min}$)<br>`7`: `uint8` (`Relay/Fault`) | `pack_current` ($\text{A}$)<br>`pack_voltage` ($\text{V}$)<br>`soc` ($\text{\%}$)<br>`temp_max`, `temp_min` ($^\circ\text{C}$) | `kratos/telemetria/bms/estado`<br>`kratos/telemetria/bms/0x6b0` |
+| `0x6b1` | `orion_bms` | **Big Endian** | `0..1`: `uint16 BE` (`DCL [A]` )<br>`2..3`: `uint16 BE` (`CCL [A]` )<br>`4..5`: `uint16 BE` ($0.0001\text{ V}$)<br>`6..7`: `uint16 BE` ($0.0001\text{ V}$) | `pack_dcl` ($\text{A}$), `pack_ccl` ($\text{A}$)<br>`high_cell_voltage` ($\text{V}$)<br>`low_cell_voltage` ($\text{V}$) | `kratos/telemetria/bms/limites_celdas`<br>`kratos/telemetria/bms/0x6b1` |
+| `0x0a2` | `inversor_borgwarner` | **Little Endian** | `0..1`: `int16 LE` ($0.1\text{ }^\circ\text{C}$)<br>`4..5`: `int16 LE` ($0.1\text{ }^\circ\text{C}$) | `inverter_temp` ($^\circ\text{C}$)<br>`motor_temp` ($^\circ\text{C}$) | `kratos/telemetria/inversor/temperaturas`<br>`kratos/telemetria/inversor/0x0a2` |
+| `0x0a5` | `inversor_borgwarner` | **Little Endian** | `2..3`: `int16 LE` ($1\text{ RPM}$) | `motor_speed_rpm` ($\text{RPM}$) | `kratos/telemetria/inversor/velocidad_motor`<br>`kratos/telemetria/inversor/0x0a5` |
+| `0x0a6` | `inversor_borgwarner` | **Little Endian** | `6..7`: `int16 LE` ($0.1\text{ A}$) | `dc_bus_current` ($\text{A}$) | `kratos/telemetria/inversor/corriente_dc`<br>`kratos/telemetria/inversor/0x0a6` |
+| `0x0a7` | `inversor_borgwarner` | **Little Endian** | `0..1`: `int16 LE` ($0.1\text{ V}$) | `dc_bus_voltage` ($\text{V}$) | `kratos/telemetria/inversor/voltaje_dc`<br>`kratos/telemetria/inversor/0x0a7` |
 
 ---
 
 ## 6. Guía Paso a Paso de Ejecución y Pruebas en Ubuntu (Sin Hardware)
-
-Sigue estos pasos para validar toda la cadena de adquisición en tu entorno local Ubuntu antes de desplegar en la Raspberry Pi 5:
 
 ### Paso 1: Levantar la interfaz CAN virtual (`vcan0`)
 ```bash
@@ -138,14 +143,13 @@ cd Kratos
 ```bash
 docker compose up -d
 ```
-> Nota: Si es la primera vez que inicias Node-RED, puedes instalar las dependencias declaradas en `nodered/data/package.json` ejecutando:
+> Nota: Para instalar las dependencias declaradas en `nodered/data/package.json` por primera vez:
 > ```bash
 > docker exec -it kratos-nodered npm install --prefix /data
 > docker restart kratos-nodered
 > ```
 
 ### Paso 3: Iniciar el simulador de tramas CAN (`can_simulator.py`)
-Instala `python-can` en tu entorno de Python y ejecuta el emulador:
 ```bash
 pip install python-can
 python3 ./scripts/can_simulator.py --interface vcan0 --freq 5
@@ -177,4 +181,4 @@ python3 ./scripts/can_simulator.py --interface vcan0 --freq 5
    ```bash
    ./Kratos/scripts/setup_can0_rpi5.sh can0 500000
    ```
-3. En `Kratos/.env` (y en el nodo `socketcan-config` de Node-RED), cambia `vcan0` por `can0` y levanta el stack con `docker compose up -d`.
+3. En `Kratos/.env` (y en el nodo `socketcan-config` de Node-RED), configura `can0` y levanta el stack con `docker compose up -d`.

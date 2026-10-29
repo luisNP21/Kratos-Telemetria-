@@ -1,0 +1,57 @@
+# ==============================================================================
+# KRATOS FSAE TELEMETRÍA — .gitignore
+# ==============================================================================
+
+# ── 1. Variables de Entorno y Secretos (Tokens InfluxDB, Passwords) ──────────
+.env
+*.env
+!.env.example
+
+# ── 2. Node-RED: Módulos, Credenciales Encriptadas y Archivos de Runtime ─────
+**/node_modules/
+Kratos/nodered/data/package-lock.json
+Kratos/nodered/data/.config.*.json
+Kratos/nodered/data/.config.*.json.backup
+Kratos/nodered/data/.flows*.backup
+Kratos/nodered/data/flows_cred.json
+Kratos/nodered/data/.flows_cred.json.backup
+Kratos/nodered/data/settings.js
+Kratos/nodered/data/lib/
+Kratos/nodered/data/context/
+
+# Asegurar que flows.json y package.json sí sean rastreados
+!Kratos/nodered/data/flows.json
+!Kratos/nodered/data/package.json
+
+# ── 3. Datos Persistentes de Contenedores (Mosquitto, InfluxDB, Grafana) ─────
+Kratos/mosquitto/data/
+Kratos/mosquitto/log/
+Kratos/influxdb/
+Kratos/grafana/
+
+# ── 4. Python (Simulador CAN y Scripts) ──────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.Python
+pip-log.txt
+
+# ── 5. Capturas y Trazas crudas de Bus CAN (can-utils / candump) ─────────────
+*.log
+*.asc
+*.blf
+*.trc
+candump-*.log
+
+# ── 6. Sistema Operativo y Editores (Ubuntu / Windows WSL2 / VS Code) ────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+

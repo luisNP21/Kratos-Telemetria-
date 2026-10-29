@@ -1,0 +1,80 @@
+{
+  "name": "socketcan",
+  "author": {
+    "name": "Sebastian Haas",
+    "email": "sebastian@sebastianhaas.info"
+  },
+  "description": "A SocketCAN abstraction layer for NodeJS.",
+  "version": "4.2.3",
+  "license": "MIT",
+  "keywords": [
+    "can",
+    "canbus",
+    "socketcan",
+    "linux",
+    "native",
+    "addon",
+    "iobroker",
+    "automotive"
+  ],
+  "homepage": "https://github.com/sebi2k1/node-can#readme",
+  "bugs": {
+    "url": "https://github.com/sebi2k1/node-can/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/sebi2k1/node-can.git"
+  },
+  "scripts": {
+    "configure": "node-gyp configure",
+    "build": "node-gyp build",
+    "build:ts": "tsc",
+    "build:all": "npm run build && npm run build:ts",
+    "lint": "eslint --fix '*/**/*.{js,ts}'",
+    "install": "node-gyp rebuild",
+    "prepare": "npm run build:ts",
+    "test": "mocha",
+    "coverage": "nyc npm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "@types/node": "^26.0.0",
+    "@types/xml2js": "^0.4.14",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^10.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "eslint-plugin-prettier": "^5.0.0",
+    "globals": "^17.0.0",
+    "mocha": "^11.0.0",
+    "nyc": "^18.0.0",
+    "prettier": "^3.0.0",
+    "typescript": "^6.0.0"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.8.0",
+    "node-gyp": ">=12.0.0",
+    "xml2js": ">=0.6.2"
+  },
+  "main": "dist/socketcan.js",
+  "types": "dist/socketcan.d.ts",
+  "files": [
+    "binding.gyp",
+    "dist",
+    "samples",
+    "src",
+    "native",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "os": [
+    "linux"
+  ],
+  "overrides": {
+    "diff": "^9.0.0",
+    "serialize-javascript": "^7.0.5",
+    "uuid": "^14.0.0"
+  }
+}

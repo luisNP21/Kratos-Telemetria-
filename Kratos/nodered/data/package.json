@@ -1,0 +1,11 @@
+{
+  "name": "kratos-fsae-nodered-telemetry",
+  "version": "2.0.0",
+  "description": "Sistema de adquisición CAN Bus (SocketCAN), decodificación Big Endian (Motorola), almacenamiento local en InfluxDB y transmisión MQTT para Kratos Formula SAE - Raspberry Pi 5",
+  "private": true,
+  "dependencies": {
+    "node-red-contrib-socketcan": "^1.2.5",
+    "node-red-contrib-influxdb": "^0.7.0"
+  }
+}
+

@@ -1,0 +1,102 @@
+services:
+  # ── 1. Eclipse Mosquitto — Broker MQTT (Transmisión de Telemetría) ──────────
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: kratos-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    networks:
+      - kratos-net
+
+  # ── 2. InfluxDB 2.7 — Base de Datos de Series de Tiempo (Caja Negra Local) ──
+  influxdb:
+    image: influxdb:2.7
+    container_name: kratos-influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: ${DOCKER_INFLUXDB_INIT_MODE:-setup}
+      DOCKER_INFLUXDB_INIT_USERNAME: ${DOCKER_INFLUXDB_INIT_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${DOCKER_INFLUXDB_INIT_PASSWORD:-kratos_influx_pass}
+      DOCKER_INFLUXDB_INIT_ORG: ${DOCKER_INFLUXDB_INIT_ORG:-kratos_fsae}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${DOCKER_INFLUXDB_INIT_BUCKET:-telemetria_carro}
+      DOCKER_INFLUXDB_INIT_RETENTION: ${DOCKER_INFLUXDB_INIT_RETENTION:-0s}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN:-kratos-fsae-telemetry-token-2026}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kratos-net
+
+  # ── 3. Node-RED — Ingesta SocketCAN, Decodificación Big Endian y Ruteo ──────
+  # NOTA DE ARQUITECTURA:
+  # - En WSL2 / Docker Desktop (Windows), se usa 'ports: ["1880:1880"]' y 'kratos-net'
+  #   porque Docker Desktop ejecuta una VM intermedia que bloquea 'localhost:1880' con network_mode: host.
+  # - En la Raspberry Pi 5 (Linux nativo), puedes descomentar 'network_mode: host'
+  #   y comentar 'ports' y 'networks' para acceso directo al bus físico can0.
+  nodered:
+    image: nodered/node-red:latest
+    container_name: kratos-nodered
+    restart: unless-stopped
+    # network_mode: host
+    ports:
+      - "1880:1880"
+    depends_on:
+      mosquitto:
+        condition: service_started
+      influxdb:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-America/Bogota}
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_ORG: ${DOCKER_INFLUXDB_INIT_ORG:-kratos_fsae}
+      INFLUXDB_BUCKET: ${DOCKER_INFLUXDB_INIT_BUCKET:-telemetria_carro}
+      INFLUXDB_TOKEN: ${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN:-kratos-fsae-telemetry-token-2026}
+      MQTT_HOST: mosquitto
+      CAN_INTERFACE: ${CAN_INTERFACE:-vcan0}
+    volumes:
+      - ./nodered/data:/data
+    networks:
+      - kratos-net
+
+  # ── 4. Grafana — Dashboards y Visualización de Telemetría ───────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: kratos-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-kratos_grafana_pass}
+      GF_USERS_ALLOW_SIGN_UP: ${GF_USERS_ALLOW_SIGN_UP:-false}
+      TZ: ${TZ:-America/Bogota}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - kratos-net
+
+networks:
+  kratos-net:
+    driver: bridge
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:
